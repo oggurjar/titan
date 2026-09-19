@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pika Rank Finder - Pika Network Scanner</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="glow-bg"></div>
+    <div class="app-container">
+
+        <!-- Header -->
+        <header>
+            <div class="logo-area">
+                <span class="logo-accent">⚡</span>
+                <h1>PIKA <span class="text-gradient">RANK FINDER</span></h1>
+            </div>
+            <p class="subtitle">Auto-crawls the Pika Network friend graph — surfaces ranked accounts that are Premium on Pika &amp; have an available MC name</p>
+        </header>
+
+        <main>
+            <!-- Mode Tabs -->
+            <div class="mode-tabs">
+                <button class="mode-tab active" id="tab-crawl" data-tab="crawl">
+                    <span>🕸️</span> Auto Crawl
+                </button>
+                <button class="mode-tab" id="tab-single" data-tab="single">
+                    <span>👤</span> Single Player
+                </button>
+            </div>
+
+            <!-- ═══════════════════════════════════════════════
+                 CRAWL PANEL
+            ═══════════════════════════════════════════════ -->
+            <div id="panel-crawl">
+
+                <!-- Seed input + rank picker + controls -->
+                <section class="card search-card" id="crawl-seed-card">
+
+                    <!-- Row 1: Rank picker dropdown + pills -->
+                    <div class="rank-picker-row">
+                        <span class="rank-picker-heading">🎯 Target Ranks</span>
+                        <div class="multi-select-container">
+                            <button type="button" class="multi-select-btn" id="rank-select-btn">
+                                <span id="rank-select-btn-text">Titan</span>
+                                <span class="dropdown-chevron">▼</span>
+                            </button>
+                            <div class="multi-select-dropdown hidden" id="rank-dropdown-menu">
+                                <div class="multi-select-header">
+                                    <input type="text" id="rank-search-input" placeholder="🔍 Search ranks..." autocomplete="off">
+                                    <div class="custom-rank-add-row">
+                                        <input type="text" id="custom-rank-input" placeholder="+ Add custom rank..." autocomplete="off">
+                                        <button type="button" id="custom-rank-add-btn" class="btn-text-action add-btn">Add</button>
+                                    </div>
+                                    <div class="multi-select-actions">
+                                        <button type="button" id="rank-btn-select-all" class="btn-text-action">Select All</button>
+                                        <span class="action-divider">|</span>
+                                        <button type="button" id="rank-btn-clear-all" class="btn-text-action">Clear All</button>
+                                    </div>
+                                </div>
+                                <div class="multi-select-options" id="rank-options-container">
+                                    <!-- Checkboxes dynamically inserted -->
+                                </div>
+                            </div>
+                        </div>
+                        <span id="rank-picker-label" class="rank-picker-label">1 Rank Selected</span>
+                    </div>
+                    <div class="selected-ranks-pills" id="selected-ranks-pills"></div>
+
+                    <!-- Row 2: Seed + buttons -->
+                    <div class="crawl-seed-row">
+                        <div class="input-group" style="flex:1;">
+                            <span class="input-icon">🌱</span>
+                            <input type="text" id="crawl-seed-input"
+                                placeholder="Seed username to start crawling from..."
+                                autocomplete="off" spellcheck="false">
+                        </div>
+                        <button id="crawl-start-btn" class="btn-primary">
+                            <span>▶ Start Crawl</span>
+                            <span class="btn-glow"></span>
+                        </button>
+                        <button id="crawl-stop-btn" class="btn-danger hidden">
+                            ⏹ Stop
+                        </button>
+                    </div>
+
+                    <!-- Resume banner -->
+                    <div id="resume-banner" class="resume-banner hidden">
+                        <span id="resume-text">Previous session detected.</span>
+                        <button id="crawl-resume-btn" class="btn-secondary" style="padding:0.35rem 1rem; font-size:0.85rem;">
+                            ▶ Resume
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Live stats bar -->
+                <div class="stats-bar card" id="crawl-stats-bar">
+                    <div class="stat-pill">
+                        <span class="stat-pill-val" id="cs-scanned">0</span>
+                        <span class="stat-pill-lbl">Scanned</span>
+                    </div>
+                    <div class="stat-pill">
+                        <span class="stat-pill-val" id="cs-queued">0</span>
+                        <span class="stat-pill-lbl">Queued</span>
+                    </div>
+                    <div class="stat-pill">
+                        <span class="stat-pill-val" id="cs-visited">0</span>
+                        <span class="stat-pill-lbl">Visited</span>
+                    </div>
+                    <div class="stat-pill accent-pill">
+                        <span class="stat-pill-val" id="cs-titans">0</span>
+                        <span class="stat-pill-lbl">Matches Found</span>
+                    </div>
+                    <div class="stat-pill" id="cs-status-pill">
+                        <span class="status-dot offline" id="cs-dot"></span>
+                        <span class="stat-pill-lbl" id="cs-status-label">Idle</span>
+                    </div>
+                    <button id="crawl-export-btn" class="btn-secondary export-btn" title="Export results as CSV">
+                        📥 Export CSV
+                    </button>
+                    <div class="stat-pill" id="watchlist-pill" title="Accounts with matching rank but name was taken — click Recheck to check them again">
+                        <span class="stat-pill-val" id="cs-watchlist">0</span>
+                        <span class="stat-pill-lbl">Watchlist</span>
+                    </div>
+                    <div class="stat-pill" title="Accounts already profiled — won't be re-fetched">
+                        <span class="stat-pill-val" id="cs-pcache">0</span>
+                        <span class="stat-pill-lbl">Cached</span>
+                    </div>
+                    <button id="crawl-export-btn" class="btn-secondary export-btn" title="Export results as CSV">
+                        📥 Export CSV
+                    </button>
+                    <button id="hide-seen-btn" class="btn-secondary export-btn" title="Toggle seen accounts visibility">
+                        👁 Hide Seen
+                    </button>
+                    <button id="clear-seen-btn" class="btn-secondary export-btn" title="Clear your entire seen list so all results show again">
+                        🗑 Clear Seen
+                    </button>
+                </div>
+
+                    <!-- Pika Scan Controls -->
+                <div class="pika-scan-bar card" id="pika-scan-card">
+                    <div class="pika-scan-header">
+                        <span class="pika-scan-title">🔑 Pika Verification</span>
+                        <span id="pika-scan-status" class="pika-scan-sub">Scan accounts for premium/cracked after crawling</span>
+                    </div>
+                    <div class="pika-scan-controls">
+                        <button id="pika-scan-start-btn" class="btn-secondary">
+                            🔑 Scan All on Pika
+                        </button>
+                        <button id="pika-scan-revisit-btn" class="btn-secondary" title="Re-check ALL accounts — only keep premium">
+                            🔄 Revisit All
+                        </button>
+                        <button id="watchlist-recheck-btn" class="btn-secondary" title="Re-check Mojang name availability for all watchlist accounts (right rank, name was taken)">
+                            👁 Recheck Watchlist (<span id="watchlist-recheck-count">0</span>)
+                        </button>
+                        <button id="pika-scan-stop-btn" class="btn-danger hidden">
+                            ⏹ Stop Scan
+                        </button>
+                    </div>
+                    <div id="pika-scan-progress" class="pika-scan-progress-wrap hidden">
+                        <div class="pika-scan-progress-bar">
+                            <div id="pika-scan-bar" class="pika-scan-progress-fill" style="width:0%"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live feed ticker -->
+                <div class="live-feed card" id="live-feed-card">
+                    <div class="live-feed-header">
+                        <span class="live-dot" id="live-indicator"></span>
+                        <span class="live-feed-title">Live Feed</span>
+                        <span id="live-feed-sub" class="live-feed-sub">Waiting to start...</span>
+                    </div>
+                    <div class="live-feed-ticker" id="live-feed-ticker">
+                        <span class="ticker-idle">Start a crawl to see real-time activity here.</span>
+                    </div>
+                </div>
+
+                <!-- Results -->
+                <section id="crawl-results-section">
+                    <div class="grid-header">
+                        <h3>⚡ MATCHED ACCOUNTS — AVAILABLE NAME · PREMIUM ON PIKA</h3>
+                        <span class="count-badge" id="crawl-titans-count">0 found</span>
+                    </div>
+                    <!-- Rank filter pills — only shown when multiple ranks present -->
+                    <div id="rank-filter-bar" class="rank-filter-bar" style="display:none;"></div>
+                    <div class="friends-grid" id="crawl-titans-grid"></div>
+                    <div id="crawl-empty-state" class="card empty-card">
+                        <div class="empty-icon">🎯</div>
+                        <h3>No Matches Found Yet</h3>
+                        <p>Pick a gamemode + rank above, enter a seed player, and hit Start Crawl.</p>
+                    </div>
+                </section>
+            </div>
+
+            <!-- ═══════════════════════════════════════════════
+                 SINGLE PLAYER PANEL
+            ═══════════════════════════════════════════════ -->
+            <div id="panel-single" style="display:none;">
+
+                <section class="card search-card">
+                    <form id="search-form" class="search-form">
+                        <div class="input-group">
+                            <span class="input-icon">👤</span>
+                            <input type="text" id="username-input"
+                                placeholder="Enter Minecraft username..."
+                                required autocomplete="off" spellcheck="false">
+                        </div>
+                        <button type="submit" id="search-btn">
+                            <span>Scan Friends</span>
+                            <span class="btn-glow"></span>
+                        </button>
+                    </form>
+                </section>
+
+                <!-- Loading -->
+                <section id="loading-section" class="card loading-card hidden">
+                    <div class="loader">
+                        <div class="spinner-ring"></div>
+                        <div class="spinner-core">⚡</div>
+                    </div>
+                    <h3 id="loading-status">Retrieving player profile...</h3>
+                    <p id="loading-detail">Initiating handshake with Pika Network Stats API.</p>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill"></div>
+                    </div>
+                </section>
+
+                <!-- Error -->
+                <section id="error-section" class="card error-card hidden">
+                    <div class="error-icon">❌</div>
+                    <div class="error-message">
+                        <h3 id="error-title">Search Failed</h3>
+                        <p id="error-desc">Could not connect to the API.</p>
+                    </div>
+                    <button id="error-close-btn" class="btn-secondary">Dismiss</button>
+                </section>
+
+                <!-- Player profile summary -->
+                <section id="player-profile-section" class="card player-profile-card hidden">
+                    <div class="player-profile-header">
+                        <div class="avatar-container">
+                            <img id="player-avatar" src="" alt="Player Avatar" crossorigin="anonymous">
+                        </div>
+                        <div class="player-info">
+                            <div class="player-name-row">
+                                <h2 id="player-username">PlayerName</h2>
+                                <span id="player-clan-badge" class="badge clan-badge hidden">Clan</span>
+                            </div>
+                            <div class="player-ranks" id="player-ranks-container"></div>
+                            <div class="player-meta-info">
+                                <span class="meta-item">
+                                    <span class="meta-icon">⭐</span>
+                                    <span id="player-level">Level --</span>
+                                </span>
+                                <span class="meta-item">
+                                    <span class="meta-icon">👁️</span>
+                                    <span id="player-last-seen">Last seen: --</span>
+                                </span>
+                            </div>
+                        </div>
+                        <div class="scan-stats">
+                            <div class="stat-box">
+                                <span class="stat-val" id="stat-total-friends">0</span>
+                                <span class="stat-lbl">Friends Scanned</span>
+                            </div>
+                            <div class="stat-box accent-box">
+                                <span class="stat-val" id="stat-titans-found">0</span>
+                                <span class="stat-lbl">Rank Matches</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Filter / sort -->
+                <section id="controls-section" class="controls-card hidden">
+                    <div class="controls-wrapper">
+                        <div class="filter-search-group">
+                            <span class="filter-icon">🔍</span>
+                            <input type="text" id="friend-filter" placeholder="Filter by username...">
+                        </div>
+                        <div class="sort-group">
+                            <label for="friend-sort">Sort by:</label>
+                            <div class="select-wrapper">
+                                <select id="friend-sort">
+                                    <option value="no-skin-first" selected>No Skin First</option>
+                                    <option value="name-asc">Username (A–Z)</option>
+                                    <option value="name-desc">Username (Z–A)</option>
+                                    <option value="seen-new">Last Seen (Newest)</option>
+                                    <option value="seen-old">Last Seen (Oldest)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Results -->
+                <section id="results-section" class="hidden">
+                    <div class="results-group">
+                        <div class="grid-header">
+                            <h3>RANK MATCHES DETECTED</h3>
+                            <span class="count-badge" id="titans-count">0 found</span>
+                        </div>
+                        <div class="friends-grid" id="friends-grid"></div>
+                        <div id="empty-state" class="card empty-card hidden">
+                            <div class="empty-icon">🎯</div>
+                            <h3>No Matching Friends Found</h3>
+                            <p>None of this player's friends hold the selected rank.</p>
+                        </div>
+                    </div>
+
+                    <div class="group-separator">
+                        <div class="separator-line"></div>
+                        <span class="separator-text">OTHER ACCOUNTS</span>
+                        <div class="separator-line"></div>
+                    </div>
+
+                    <div class="results-group">
+                        <div class="grid-header">
+                            <h3>OTHER ACCOUNTS</h3>
+                            <span class="count-badge" id="others-count">0 found</span>
+                        </div>
+                        <div class="friends-grid" id="others-grid"></div>
+                        <div id="empty-state-others" class="card empty-card hidden">
+                            <div class="empty-icon">👥</div>
+                            <h3>No Other Friends Found</h3>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+        </main>
+
+        <footer>
+            <p>Pika Rank Finder &copy; 2026. Built with speed and precision.</p>
+            <p class="footer-links">
+                Data: <a href="https://stats.pika-network.net" target="_blank" rel="noopener noreferrer">stats.pika-network.net</a>
+                &nbsp;·&nbsp;
+                Store: <a href="https://store.pika-network.net" target="_blank" rel="noopener noreferrer">store.pika-network.net</a>
+            </p>
+        </footer>
+    </div>
+
+    <!-- Skin Preview Modal -->
+    <div id="skin-modal" class="modal hidden">
+        <div class="modal-backdrop" id="modal-backdrop"></div>
+        <div class="modal-content card">
+            <button id="modal-close" class="modal-close-btn">&times;</button>
+            <h2 class="text-gradient">Skin &amp; Model Preview</h2>
+            <p id="modal-subtitle" class="subtitle" style="margin-bottom:1.5rem;">Checking skin model type...</p>
+            <div class="modal-body">
+                <div class="skin-render-container">
+                    <img id="modal-skin-body" src="" alt="Body Render" crossorigin="anonymous">
+                </div>
+                <div class="skin-details-panel">
+                    <div class="skin-stat">
+                        <span class="skin-stat-label">Player Name</span>
+                        <span id="modal-skin-username" class="skin-stat-value">Detecting...</span>
+                    </div>
+                    <div class="skin-stat">
+                        <span class="skin-stat-label">Model Arm Width</span>
+                        <span id="modal-skin-model" class="skin-stat-value">Detecting...</span>
+                    </div>
+                    <div class="skin-stat">
+                        <span class="skin-stat-label">Model Description</span>
+                        <span id="modal-skin-model-desc" class="skin-stat-desc">Analyzing...</span>
+                    </div>
+                    <div class="raw-skin-area">
+                        <span class="skin-stat-label">Raw Texture</span>
+                        <div class="raw-skin-preview">
+                            <img id="modal-skin-raw" src="" alt="Raw Skin" crossorigin="anonymous">
+                        </div>
+                    </div>
+                    <div class="modal-actions" style="margin-top:0.5rem;">
+                        <a id="modal-download-btn" href="#" download class="btn-secondary link-btn" style="text-decoration:none;">
+                            📥 Download Skin PNG
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast hidden">Copied!</div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

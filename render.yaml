@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: pika-rank-finder
+    runtime: node         # we need both Python + Node
+    # Render doesn't have a combined Python+Node runtime, so we use a
+    # Dockerfile instead (see Dockerfile). Change runtime to "docker" when ready.
+    # For a quick deploy without Docker, use runtime: python and note that
+    # pika_check.js (the bot check) will be unavailable.
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:$PORT --timeout 120
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: RENDER
+        value: "true"
+    disk:
+      name: pika-data
+      mountPath: /data
+      sizeGB: 1

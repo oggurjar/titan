@@ -1,0 +1,40 @@
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# ── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+
+# ── Runtime data — never commit these ────────────────────────────────────────
+titans.json
+player_cache.json
+crawl_state.json
+seen_titans.json
+watchlist.json
+
+# ── Probe/scratch files ───────────────────────────────────────────────────────
+probe_*.js
+probe_*.txt
+debug_*.js
+jartex_check.js
+extract_ranks.py
+test_import.py
+start.bat
+*.bat
+
+# ── IDE / OS ─────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
