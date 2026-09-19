@@ -497,6 +497,127 @@ def passes_rank_filter(ranks: list) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# DISCORD WEBHOOK
+# ---------------------------------------------------------------------------
+DISCORD_WEBHOOK = os.environ.get(
+    "DISCORD_WEBHOOK",
+    "https://discord.com/api/webhooks/1550763498110189709/y-1OEjWiHThykQY89ey7U8zGfPcEMUmw1kBezuYe7ZJ6SVoGsYaDSLjewbi7I3-5uD3Q"
+)
+
+
+def _send_discord_alert(entry: dict, namedrop: dict | None = None):
+    """
+    Fire a Discord webhook embed when a premium account is confirmed.
+    Runs in a background thread so it never blocks the pika worker.
+    """
+    if not DISCORD_WEBHOOK:
+        return
+
+    username     = entry.get("username", "?")
+    ranks        = entry.get("ranks", [])
+    rank_names   = ", ".join(cleanstr(r.get("displayName", "")) for r in ranks) or "Unknown"
+    found_for    = ", ".join(entry.get("foundForRanks", [])) or rank_names
+    last_seen    = entry.get("lastSeen")
+    clan         = (entry.get("clan") or {}).get("name", "")
+
+    # Last seen string
+    if last_seen:
+        import datetime
+        try:
+            dt       = datetime.datetime.fromtimestamp(last_seen / 1000, tz=datetime.timezone.utc)
+            diff_s   = (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds()
+            days     = int(diff_s // 86400)
+            hrs      = int((diff_s % 86400) // 3600)
+            ls_str   = f"{days}d {hrs}h ago" if days else f"{hrs}h ago" if hrs else "Just now"
+        except Exception:
+            ls_str = "Unknown"
+    else:
+        ls_str = "⚠️ Never played on Pika"
+
+    # Name drop string
+    drop_str = "–"
+    changed_str = "–"
+    if namedrop:
+        if namedrop.get("available"):
+            drop_str = "🟢 Available now / Never taken"
+        elif namedrop.get("dropsAt"):
+            try:
+                import datetime
+                target  = datetime.datetime.fromisoformat(
+                    namedrop["dropsAt"].replace("Z", "+00:00")
+                )
+                now     = datetime.datetime.now(datetime.timezone.utc)
+                diff    = (target - now).total_seconds()
+                if diff <= 0:
+                    drop_str = "🟢 Claimable now!"
+                else:
+                    d = int(diff // 86400)
+                    h = int((diff % 86400) // 3600)
+                    m = int((diff % 3600) // 60)
+                    s = int(diff % 60)
+                    if d:   drop_str = f"⏳ {d}d {h}h {m}m"
+                    elif h: drop_str = f"⏳ {h}h {m}m {s}s"
+                    else:   drop_str = f"⏳ {m}m {s}s"
+            except Exception:
+                drop_str = namedrop.get("dropsAt", "–")
+        if namedrop.get("changedAt"):
+            try:
+                import datetime
+                dt = datetime.datetime.fromisoformat(
+                    namedrop["changedAt"].replace("Z", "+00:00")
+                )
+                changed_str = dt.strftime("%b %d, %Y")
+            except Exception:
+                changed_str = namedrop.get("changedAt", "–")
+
+    embed = {
+        "embeds": [{
+            "title": f"⚡ Premium Account Found — `{username}`",
+            "color": 0xa78bfa,
+            "fields": [
+                {"name": "👤 Username",       "value": f"`{username}`",   "inline": True},
+                {"name": "🏆 Rank",           "value": found_for,         "inline": True},
+                {"name": "✅ Pika Status",    "value": "Premium (Microsoft account)", "inline": True},
+                {"name": "🕒 Name Changed",   "value": changed_str,       "inline": True},
+                {"name": "⏳ Claimable In",   "value": drop_str,          "inline": True},
+                {"name": "👁 Last Seen",      "value": ls_str,            "inline": True},
+                *([{"name": "🏠 Clan", "value": clan, "inline": True}] if clan else []),
+            ],
+            "footer": {"text": "Pika Rank Finder"},
+            "thumbnail": {"url": f"https://mc-heads.net/avatar/{username}/64"},
+            "url": f"https://namemc.com/name/{username}",
+        }],
+        "components": [{
+            "type": 1,
+            "components": [
+                {
+                    "type": 2, "style": 5, "label": "🏷 NameMC",
+                    "url": f"https://namemc.com/name/{username}",
+                },
+                {
+                    "type": 2, "style": 5, "label": "📊 Pika Stats",
+                    "url": f"https://stats.pika-network.net/player/{username}",
+                },
+            ],
+        }],
+    }
+
+    def _fire():
+        try:
+            http_session.post(DISCORD_WEBHOOK, json=embed, timeout=8)
+        except Exception as e:
+            print(f"[WEBHOOK] Failed to send for {username}: {e}")
+
+    Thread(target=_fire, daemon=True).start()
+
+
+def cleanstr(s: str) -> str:
+    """Strip Minecraft color codes."""
+    import re
+    return re.sub(r'[§&][0-9a-fk-orA-FK-OR]', '', s or '').strip()
+
+
+# ---------------------------------------------------------------------------
 # CRAWL ENGINE
 # ---------------------------------------------------------------------------
 class CrawlEngine:
@@ -918,11 +1039,45 @@ class CrawlEngine:
                                 pass
                         break
 
+            # Fire Discord webhook for premium accounts
+            if result == "premium":
+                # Fetch namedrop info for the countdown
+                namedrop = None
+                try:
+                    nd_r = http_session.get(
+                        f"https://namemc.com/name/{username}",
+                        headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"},
+                        timeout=8,
+                    )
+                    if nd_r.status_code == 200:
+                        import re
+                        html = nd_r.text
+                        available = bool(re.search(r'status-available|>Available<', html, re.I))
+                        times = re.findall(r'<time[^>]+datetime=["\']([^"\']+)["\']', html, re.I)
+                        namedrop = {
+                            "available":  available,
+                            "dropsAt":    times[0] if times else None,
+                            "changedAt":  times[1] if len(times) > 1 else None,
+                        }
+                except Exception:
+                    pass
+                _send_discord_alert(entry, namedrop)
+
+            # Look up the full entry to send to the client (for rank badges etc.)
+            with self._lock:
+                player_entry = next(
+                    (t for t in self.titans if t["username"].lower() == username.lower()),
+                    {"username": username, "ranks": [], "foundForRanks": [],
+                     "rank": {}, "lastSeen": None, "clan": None,
+                     "nameStatus": "free", "pikaResult": result},
+                )
+
             self._broadcast({
                 "type":       "pika_update",
                 "username":   username,
                 "pikaResult": result,
                 "pikaReason": reason,
+                "player":     player_entry,
             })
             self._pika_queue.task_done()
 
@@ -981,11 +1136,18 @@ class CrawlEngine:
                             except ValueError:
                                 pass
                         break
+                player_entry = next(
+                    (t for t in self.titans if t["username"].lower() == username.lower()),
+                    {"username": username, "ranks": [], "foundForRanks": [],
+                     "rank": {}, "lastSeen": None, "clan": None,
+                     "nameStatus": "free", "pikaResult": result},
+                )
             self._broadcast({
                 "type":       "pika_update",
                 "username":   username,
                 "pikaResult": result,
                 "pikaReason": reason,
+                "player":     player_entry,
                 "done":       done,
                 "total":      total,
             })

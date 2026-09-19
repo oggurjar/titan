@@ -132,7 +132,9 @@ async function loadNamedropOnCard(card, username) {
     } else if (data.dropsAt) {
         startCountdown(username, data.dropsAt, dropEl);
     } else {
-        dropEl.textContent = '–';
+        // No drop date and not flagged available — name has no known history
+        dropEl.textContent = '🟢 Never taken';
+        dropEl.style.color = 'var(--accent-green)';
     }
 
     if (changedEl) {
@@ -215,6 +217,10 @@ function createFriendCard(friend, isTarget) {
 
     const seenBadge = (isTarget && friend.alreadySeen)
         ? `<span class="seen-badge" title="You've seen this account before">👁 Seen</span>`
+        : '';
+
+    const neverPlayedBadge = (isTarget && !friend.lastSeen)
+        ? `<span class="never-played-badge" title="This account has never logged into Pika">⚠️ Never played</span>`
         : '';
 
     card.innerHTML = `
