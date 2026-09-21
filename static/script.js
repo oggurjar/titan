@@ -225,15 +225,16 @@ function createFriendCard(friend, isTarget) {
 
     card.innerHTML = `
         <div class="friend-header">
-            <a href="/?username=${friend.username}" class="friend-avatar-link" data-username="${friend.username}">
+            <a href="https://namemc.com/name/${friend.username}" target="_blank" rel="noopener noreferrer" class="friend-avatar-link" data-username="${friend.username}">
                 <div class="friend-avatar">
                     <img src="https://mc-heads.net/avatar/${friend.username}" alt="${friend.username}" loading="lazy" crossorigin="anonymous">
                 </div>
             </a>
             <div class="friend-identity">
                 <div class="friend-name-row-inner">
-                    <a href="/?username=${friend.username}" class="friend-name-link" data-username="${friend.username}">${friend.username}</a>
+                    <a href="https://namemc.com/name/${friend.username}" target="_blank" rel="noopener noreferrer" class="friend-name-link" data-username="${friend.username}">${friend.username}</a>
                     ${seenBadge}
+                    ${isTarget && !friend.lastSeen ? `<span class="never-played-badge" title="Never logged into Pika">⚠️ Never played</span>` : ''}
                 </div>
                 <div class="friend-meta">
                     <span class="friend-level">LVL ${friend.rank?.level || 0}</span>

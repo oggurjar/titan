@@ -80,8 +80,8 @@ _skin_rl       = RateLimiter(rate=8)    # mc-heads.net              — 8 req/s
 # Prevents double-fetching the same username within a single run.
 # ---------------------------------------------------------------------------
 CACHE_LOCK = Lock()
-CACHE_TTL  = 1200       # 20 min
-CACHE_MAX  = 10_000
+CACHE_TTL  = 600        # 10 min (was 20)
+CACHE_MAX  = 2_000      # was 10,000 — saves ~80MB RAM
 _PROFILE_CACHE: OrderedDict = OrderedDict()
 
 
@@ -492,129 +492,286 @@ def pika_check_account_with_reason(username: str) -> tuple:
         return "unknown", str(e)
 
 
-def passes_rank_filter(ranks: list) -> bool:
-    return rank_matches(ranks, crawler.target_ranks)
-
-
 # ---------------------------------------------------------------------------
-# DISCORD WEBHOOK
+# HARDCODED CONFIG — seeds, ranks, webhooks
 # ---------------------------------------------------------------------------
-DISCORD_WEBHOOK = os.environ.get(
-    "DISCORD_WEBHOOK",
+AUTO_SEEDS = ["SUGARCANDYSC", "Honey1X", "Nixo"]
+AUTO_RANKS = ["Baron", "Immortal", "Boss", "Titan", "Omega", "Noble", "Emperor", "Monarch", "Sigma"]
+
+DISCORD_WEBHOOK_ALERT  = os.environ.get(
+    "DISCORD_WEBHOOK_ALERT",
     "https://discord.com/api/webhooks/1550763498110189709/y-1OEjWiHThykQY89ey7U8zGfPcEMUmw1kBezuYe7ZJ6SVoGsYaDSLjewbi7I3-5uD3Q"
 )
+DISCORD_WEBHOOK_DIGEST = os.environ.get(
+    "DISCORD_WEBHOOK_DIGEST",
+    "https://discord.com/api/webhooks/1551635933177061376/Y337ctcnLvLw0K4DYgljaP-NL2ri9KEi_2BYwOdnBYEoZh6G5zyldbaOZac_Z87kIIh8"
+)
+
+# Keep backward compat
+DISCORD_WEBHOOK = DISCORD_WEBHOOK_ALERT
+
+# ID of the last digest message (so we can edit it instead of posting new ones)
+_digest_message_id: str | None = None
+_digest_lock = Lock()
 
 
-def _send_discord_alert(entry: dict, namedrop: dict | None = None):
+import datetime as _dt
+
+NAME_DROP_DAYS = 37
+
+
+def cleanstr(s: str) -> str:
+    import re
+    return re.sub(r'[§&][0-9a-fk-orA-FK-OR]', '', s or '').strip()
+
+
+def get_exact_drop_time(username: str) -> dict:
     """
-    Fire a Discord webhook embed when a premium account is confirmed.
-    Runs in a background thread so it never blocks the pika worker.
+    Returns { dropsAt: datetime|None, changedAt: datetime|None,
+               available: bool, source: str }
+    Priority: Mojang free check → Laby.net history → NameMC scrape
     """
-    if not DISCORD_WEBHOOK:
+    result = {"dropsAt": None, "changedAt": None, "available": False, "source": "none"}
+    try:
+        mj = http_session.get(
+            f"https://api.mojang.com/users/profiles/minecraft/{username}",
+            headers={"Accept": "application/json"}, timeout=6,
+        )
+        if mj.status_code == 404:
+            result["available"] = True
+            result["source"]    = "mojang"
+            return result
+        if mj.status_code != 200:
+            return result
+        uuid = mj.json().get("id", "")
+    except Exception:
+        return result
+
+    if not uuid:
+        return result
+
+    uuid_fmt = f"{uuid[0:8]}-{uuid[8:12]}-{uuid[12:16]}-{uuid[16:20]}-{uuid[20:]}"
+
+    # Laby.net
+    try:
+        lb = http_session.get(
+            f"https://laby.net/api/v3/user/{uuid_fmt}/profile",
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=8,
+        )
+        if lb.status_code == 200:
+            for entry in (lb.json().get("username_history") or []):
+                ts = entry.get("changed_at")
+                if ts:
+                    changed = _dt.datetime.fromtimestamp(ts / 1000, tz=_dt.timezone.utc)
+                    result["changedAt"] = changed
+                    result["dropsAt"]   = changed + _dt.timedelta(days=NAME_DROP_DAYS)
+                    result["source"]    = "laby"
+                    return result
+    except Exception:
+        pass
+
+    # NameMC fallback
+    try:
+        import re
+        nm = http_session.get(
+            f"https://namemc.com/name/{username}",
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"}, timeout=8,
+        )
+        if nm.status_code == 200:
+            times = re.findall(r'<time[^>]+datetime=["\']([^"\']+)["\']', nm.text, re.I)
+            if times:
+                changed = _dt.datetime.fromisoformat(times[0].replace("Z", "+00:00"))
+                result["changedAt"] = changed
+                result["dropsAt"]   = changed + _dt.timedelta(days=NAME_DROP_DAYS)
+                result["source"]    = "namemc"
+                return result
+    except Exception:
+        pass
+
+    return result
+
+
+def _fmt_drop_str(drop_dt, available: bool) -> str:
+    if available:
+        return "🟢 Available now"
+    if drop_dt is None:
+        return "❓ Unknown"
+    if isinstance(drop_dt, str):
+        try:
+            drop_dt = _dt.datetime.fromisoformat(drop_dt.replace("Z", "+00:00"))
+        except Exception:
+            return "❓ Unknown"
+    now  = _dt.datetime.now(_dt.timezone.utc)
+    diff = (drop_dt - now).total_seconds()
+    date_str = drop_dt.strftime("%b %d, %Y at %H:%M UTC")
+    if diff <= 0:
+        return f"🟢 Claimable now! ({date_str})"
+    d = int(diff // 86400); h = int((diff % 86400) // 3600); m = int((diff % 3600) // 60)
+    countdown = f"{d}d {h}h {m}m" if d else f"{h}h {m}m" if h else f"{m}m"
+    return f"⏳ {date_str} ({countdown})"
+
+
+def _send_discord_alert(entry: dict, drop_info: dict | None = None):
+    """Immediate alert embed → DISCORD_WEBHOOK_ALERT."""
+    if not DISCORD_WEBHOOK_ALERT:
         return
 
-    username     = entry.get("username", "?")
-    ranks        = entry.get("ranks", [])
-    rank_names   = ", ".join(cleanstr(r.get("displayName", "")) for r in ranks) or "Unknown"
-    found_for    = ", ".join(entry.get("foundForRanks", [])) or rank_names
-    last_seen    = entry.get("lastSeen")
-    clan         = (entry.get("clan") or {}).get("name", "")
+    username   = entry.get("username", "?")
+    ranks      = entry.get("ranks", [])
+    rank_names = ", ".join(cleanstr(r.get("displayName", "")) for r in ranks) or "Unknown"
+    found_for  = ", ".join(entry.get("foundForRanks", [])) or rank_names
+    last_seen  = entry.get("lastSeen")
+    clan       = (entry.get("clan") or {}).get("name", "")
 
-    # Last seen string
     if last_seen:
-        import datetime
         try:
-            dt       = datetime.datetime.fromtimestamp(last_seen / 1000, tz=datetime.timezone.utc)
-            diff_s   = (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds()
-            days     = int(diff_s // 86400)
-            hrs      = int((diff_s % 86400) // 3600)
-            ls_str   = f"{days}d {hrs}h ago" if days else f"{hrs}h ago" if hrs else "Just now"
+            dt     = _dt.datetime.fromtimestamp(last_seen / 1000, tz=_dt.timezone.utc)
+            diff_s = (_dt.datetime.now(_dt.timezone.utc) - dt).total_seconds()
+            d = int(diff_s // 86400); h = int((diff_s % 86400) // 3600)
+            ls_str = f"{d}d {h}h ago" if d else f"{h}h ago" if h else "Just now"
         except Exception:
             ls_str = "Unknown"
     else:
         ls_str = "⚠️ Never played on Pika"
 
-    # Name drop string
-    drop_str = "–"
-    changed_str = "–"
-    if namedrop:
-        if namedrop.get("available"):
-            drop_str = "🟢 Available now / Never taken"
-        elif namedrop.get("dropsAt"):
-            try:
-                import datetime
-                target  = datetime.datetime.fromisoformat(
-                    namedrop["dropsAt"].replace("Z", "+00:00")
-                )
-                now     = datetime.datetime.now(datetime.timezone.utc)
-                diff    = (target - now).total_seconds()
-                if diff <= 0:
-                    drop_str = "🟢 Claimable now!"
-                else:
-                    d = int(diff // 86400)
-                    h = int((diff % 86400) // 3600)
-                    m = int((diff % 3600) // 60)
-                    s = int(diff % 60)
-                    if d:   drop_str = f"⏳ {d}d {h}h {m}m"
-                    elif h: drop_str = f"⏳ {h}h {m}m {s}s"
-                    else:   drop_str = f"⏳ {m}m {s}s"
-            except Exception:
-                drop_str = namedrop.get("dropsAt", "–")
-        if namedrop.get("changedAt"):
-            try:
-                import datetime
-                dt = datetime.datetime.fromisoformat(
-                    namedrop["changedAt"].replace("Z", "+00:00")
-                )
-                changed_str = dt.strftime("%b %d, %Y")
-            except Exception:
-                changed_str = namedrop.get("changedAt", "–")
+    drop_dt    = drop_info.get("dropsAt")    if drop_info else None
+    changed_dt = drop_info.get("changedAt")  if drop_info else None
+    available  = drop_info.get("available", False) if drop_info else False
+    source     = drop_info.get("source", "none")   if drop_info else "none"
+
+    drop_str    = _fmt_drop_str(drop_dt, available)
+    changed_str = changed_dt.strftime("%b %d, %Y at %H:%M UTC") if changed_dt else "–"
+
+    fields = [
+        {"name": "🏆 Rank",         "value": found_for,   "inline": True},
+        {"name": "✅ Pika",         "value": "Premium",   "inline": True},
+        {"name": "👁 Last Seen",    "value": ls_str,      "inline": True},
+        {"name": "🕒 Name Changed", "value": changed_str, "inline": True},
+        {"name": "⏳ Claimable",    "value": drop_str,    "inline": True},
+    ]
+    if clan:
+        fields.append({"name": "🏠 Clan", "value": clan, "inline": True})
 
     embed = {
         "embeds": [{
-            "title": f"⚡ Premium Account Found — `{username}`",
-            "color": 0xa78bfa,
-            "fields": [
-                {"name": "👤 Username",       "value": f"`{username}`",   "inline": True},
-                {"name": "🏆 Rank",           "value": found_for,         "inline": True},
-                {"name": "✅ Pika Status",    "value": "Premium (Microsoft account)", "inline": True},
-                {"name": "🕒 Name Changed",   "value": changed_str,       "inline": True},
-                {"name": "⏳ Claimable In",   "value": drop_str,          "inline": True},
-                {"name": "👁 Last Seen",      "value": ls_str,            "inline": True},
-                *([{"name": "🏠 Clan", "value": clan, "inline": True}] if clan else []),
-            ],
-            "footer": {"text": "Pika Rank Finder"},
+            "title":     f"⚡ `{username}`",
+            "url":       f"https://namemc.com/name/{username}",
+            "color":     0xa78bfa,
+            "fields":    fields,
+            "footer":    {"text": f"Pika Rank Finder • {source}"},
             "thumbnail": {"url": f"https://mc-heads.net/avatar/{username}/64"},
-            "url": f"https://namemc.com/name/{username}",
         }],
         "components": [{
             "type": 1,
             "components": [
-                {
-                    "type": 2, "style": 5, "label": "🏷 NameMC",
-                    "url": f"https://namemc.com/name/{username}",
-                },
-                {
-                    "type": 2, "style": 5, "label": "📊 Pika Stats",
-                    "url": f"https://stats.pika-network.net/player/{username}",
-                },
+                {"type": 2, "style": 5, "label": "🏷 NameMC",    "url": f"https://namemc.com/name/{username}"},
+                {"type": 2, "style": 5, "label": "📊 Pika Stats", "url": f"https://stats.pika-network.net/player/{username}"},
             ],
         }],
     }
 
     def _fire():
         try:
-            http_session.post(DISCORD_WEBHOOK, json=embed, timeout=8)
+            http_session.post(DISCORD_WEBHOOK_ALERT, json=embed, timeout=8)
         except Exception as e:
-            print(f"[WEBHOOK] Failed to send for {username}: {e}")
+            print(f"[WEBHOOK-ALERT] {username}: {e}")
 
     Thread(target=_fire, daemon=True).start()
+    _update_digest()
 
 
-def cleanstr(s: str) -> str:
-    """Strip Minecraft color codes."""
-    import re
-    return re.sub(r'[§&][0-9a-fk-orA-FK-OR]', '', s or '').strip()
+# digest message id persists in memory (reset on restart)
+_digest_message_id: str | None = None
+_digest_lock = Lock()
+
+
+def _update_digest():
+    """Post or edit the sorted drop-date digest → DISCORD_WEBHOOK_DIGEST."""
+    global _digest_message_id
+    if not DISCORD_WEBHOOK_DIGEST:
+        return
+
+    def _build():
+        global _digest_message_id
+        with _digest_lock:
+            titans = [t for t in crawler.titans if t.get("pikaResult") == "premium"]
+            if not titans:
+                return
+
+            def sort_key(t):
+                di = t.get("dropInfo") or {}
+                if di.get("available"):
+                    return (0, _dt.datetime.min.replace(tzinfo=_dt.timezone.utc))
+                dt = di.get("dropsAt")
+                if dt:
+                    if isinstance(dt, str):
+                        try:
+                            dt = _dt.datetime.fromisoformat(dt.replace("Z", "+00:00"))
+                        except Exception:
+                            dt = None
+                    if dt:
+                        return (1, dt)
+                return (2, _dt.datetime.max.replace(tzinfo=_dt.timezone.utc))
+
+            titans.sort(key=sort_key)
+            now   = _dt.datetime.now(_dt.timezone.utc)
+            lines = ["## 🏆 Premium Accounts — Sorted by Drop Date\n"]
+
+            for i, t in enumerate(titans, 1):
+                uname  = t.get("username", "?")
+                ranks  = ", ".join(cleanstr(r.get("displayName", "")) for r in t.get("ranks", [])) or "?"
+                di     = t.get("dropInfo") or {}
+                drop_dt  = di.get("dropsAt")
+                available = di.get("available", False)
+                if isinstance(drop_dt, str):
+                    try:
+                        drop_dt = _dt.datetime.fromisoformat(drop_dt.replace("Z", "+00:00"))
+                    except Exception:
+                        drop_dt = None
+
+                if available or (drop_dt and (drop_dt - now).total_seconds() <= 0):
+                    status = "🟢 **CLAIMABLE NOW**"
+                elif drop_dt:
+                    diff = (drop_dt - now).total_seconds()
+                    d = int(diff // 86400); h = int((diff % 86400) // 3600); m = int((diff % 3600) // 60)
+                    date_s    = drop_dt.strftime("%b %d at %H:%M UTC")
+                    countdown = f"{d}d {h}h {m}m" if d else f"{h}h {m}m" if h else f"{m}m"
+                    status = f"⏳ {date_s} ({countdown})"
+                else:
+                    status = "❓ Unknown"
+
+                lines.append(f"{i}. [{uname}](https://namemc.com/name/{uname}) — **{ranks}** — {status}")
+
+            lines.append(f"\n*Updated: {now.strftime('%b %d, %Y %H:%M UTC')}*")
+            content = "\n".join(lines)
+            if len(content) > 1980:
+                content = content[:1977] + "..."
+
+            payload = {"content": content}
+            try:
+                if _digest_message_id:
+                    r = http_session.patch(
+                        f"{DISCORD_WEBHOOK_DIGEST}/messages/{_digest_message_id}",
+                        json=payload, timeout=8,
+                    )
+                    if r.status_code in (200, 204):
+                        return
+                    _digest_message_id = None
+
+                r = http_session.post(
+                    f"{DISCORD_WEBHOOK_DIGEST}?wait=true",
+                    json=payload, timeout=8,
+                )
+                if r.status_code in (200, 204):
+                    try:
+                        _digest_message_id = r.json().get("id")
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[WEBHOOK-DIGEST] {e}")
+
+    Thread(target=_build, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -813,10 +970,11 @@ class CrawlEngine:
 
     # ---------------------------------------------------------- crawl loop
     def _crawl_loop(self):
-        BATCH      = 20        # smaller batches → smoother rate limiting
+        BATCH      = 15
         SAVE_EVERY = 100
+        QUEUE_CAP  = 3_000
         try:
-            self._crawl_loop_inner(BATCH, SAVE_EVERY)
+            self._crawl_loop_inner(BATCH, SAVE_EVERY, QUEUE_CAP)
         except Exception as e:
             import traceback
             print(f"[CRAWL] Fatal error: {e}")
@@ -826,7 +984,7 @@ class CrawlEngine:
                              "message": f"Crawl crashed: {e}"})
             save_state(self._current_state())
 
-    def _crawl_loop_inner(self, BATCH: int, SAVE_EVERY: int):
+    def _crawl_loop_inner(self, BATCH: int, SAVE_EVERY: int, QUEUE_CAP: int = 3000):
         while self._running:
             # ── pull batch ──────────────────────────────────────────────────
             with self._lock:
@@ -839,6 +997,12 @@ class CrawlEngine:
                     if uname_lower in self.visited:
                         continue
                     self.visited.add(uname_lower)
+                    # Cap visited set — rely on player cache for older entries
+                    if len(self.visited) > 20_000:
+                        # Trim oldest 5k — sets aren't ordered but this limits RAM
+                        overflow = list(self.visited)[:5000]
+                        for k in overflow:
+                            self.visited.discard(k)
 
                     # Check persistent player cache BEFORE queueing an API call
                     pcached = _pcache_get(uname_lower)
@@ -876,14 +1040,8 @@ class CrawlEngine:
                 except Exception:
                     pass
 
-            # ── merge cache hits into profile batch ─────────────────────────
-            # We still process them for BFS expansion and rank filtering,
-            # but we skip re-doing the API call, skin check, and name check
-            # (those results are already stored).
+            # ── merge cache hits — expand BFS from their friends ────────────
             for uname, profile, has_skin in cache_hits:
-                ranks = profile.get("ranks", [])
-                # Only enqueue their friends — no skin/name check needed,
-                # we already know this account's state from cache.
                 with self._lock:
                     for f in (profile.get("friends") or []):
                         fname = f.get("username", "").strip()
@@ -891,7 +1049,8 @@ class CrawlEngine:
                             continue
                         fname_lower = fname.lower()
                         if fname_lower not in self.visited \
-                                and fname_lower not in self._queued_lower:
+                                and fname_lower not in self._queued_lower \
+                                and len(self._queue) < QUEUE_CAP:
                             self._queued_lower.add(fname_lower)
                             self._queue.append(fname)
 
@@ -905,7 +1064,8 @@ class CrawlEngine:
                             continue
                         fname_lower = fname.lower()
                         if fname_lower not in self.visited \
-                                and fname_lower not in self._queued_lower:
+                                and fname_lower not in self._queued_lower \
+                                and len(self._queue) < QUEUE_CAP:
                             self._queued_lower.add(fname_lower)
                             self._queue.append(fname)
 
@@ -1041,27 +1201,21 @@ class CrawlEngine:
 
             # Fire Discord webhook for premium accounts
             if result == "premium":
-                # Fetch namedrop info for the countdown
-                namedrop = None
-                try:
-                    nd_r = http_session.get(
-                        f"https://namemc.com/name/{username}",
-                        headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"},
-                        timeout=8,
-                    )
-                    if nd_r.status_code == 200:
-                        import re
-                        html = nd_r.text
-                        available = bool(re.search(r'status-available|>Available<', html, re.I))
-                        times = re.findall(r'<time[^>]+datetime=["\']([^"\']+)["\']', html, re.I)
-                        namedrop = {
-                            "available":  available,
-                            "dropsAt":    times[0] if times else None,
-                            "changedAt":  times[1] if len(times) > 1 else None,
-                        }
-                except Exception:
-                    pass
-                _send_discord_alert(entry, namedrop)
+                drop_info = get_exact_drop_time(username)
+                # Store drop info on the titan entry for digest sorting
+                with self._lock:
+                    for t in self.titans:
+                        if t["username"].lower() == username.lower():
+                            # serialize datetimes for JSON storage
+                            t["dropInfo"] = {
+                                "available": drop_info["available"],
+                                "source":    drop_info["source"],
+                                "dropsAt":   drop_info["dropsAt"].isoformat() if drop_info["dropsAt"] else None,
+                                "changedAt": drop_info["changedAt"].isoformat() if drop_info["changedAt"] else None,
+                            }
+                            break
+                _save_titans(self.titans)
+                _send_discord_alert(entry, drop_info)
 
             # Look up the full entry to send to the client (for rank badges etc.)
             with self._lock:
@@ -1236,6 +1390,28 @@ crawler = CrawlEngine()
 
 
 # ---------------------------------------------------------------------------
+# AUTO-RESTART WATCHDOG
+# Starts crawl automatically on boot and restarts it if it ever stops.
+# Rotates through AUTO_SEEDS so if one graph is exhausted it moves to next.
+# ---------------------------------------------------------------------------
+def _watchdog_loop():
+    seed_index = 0
+    # Give the app a moment to fully boot
+    time.sleep(10)
+    while True:
+        if not crawler._running:
+            seed  = AUTO_SEEDS[seed_index % len(AUTO_SEEDS)]
+            print(f"[WATCHDOG] Starting crawl — seed: {seed}, ranks: {AUTO_RANKS}")
+            crawler.target_ranks = list(AUTO_RANKS)
+            crawler.start(seed=seed, ranks=AUTO_RANKS)
+            seed_index += 1
+        time.sleep(30)   # check every 30s
+
+
+Thread(target=_watchdog_loop, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # FLASK ROUTES
 # ---------------------------------------------------------------------------
 @app.route("/")
@@ -1254,6 +1430,8 @@ KNOWN_RANKS = [
     "Silver", "Gold", "Diamond",
     # OneBlock
     "Peasant", "Lord",
+    # Additional ranks
+    "Immortal", "Boss", "Omega", "Noble", "Emperor", "Monarch", "Sigma",
 ]
 
 @app.route("/api/ranks", methods=["GET"])

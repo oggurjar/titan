@@ -2088,3 +2088,15 @@ footer a:hover {
     color: var(--titan-color);
     font-weight: 600;
 }
+
+/* ── Never Played Badge ─────────────────────────────────────────────────────── */
+.never-played-badge {
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    color: #f59e0b;
+    border-radius: 4px;
+    padding: 0.1rem 0.4rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
