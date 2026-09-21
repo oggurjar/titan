@@ -1296,21 +1296,22 @@ class CrawlEngine:
 
             # Fire Discord webhook for premium accounts
             if result == "premium":
-                drop_info = get_exact_drop_time(username)
-                # Store drop info on the titan entry for digest sorting
-                with self._lock:
-                    for t in self.titans:
-                        if t["username"].lower() == username.lower():
-                            # serialize datetimes for JSON storage
-                            t["dropInfo"] = {
-                                "available": drop_info["available"],
-                                "source":    drop_info["source"],
-                                "dropsAt":   drop_info["dropsAt"].isoformat() if drop_info["dropsAt"] else None,
-                                "changedAt": drop_info["changedAt"].isoformat() if drop_info["changedAt"] else None,
-                            }
-                            break
-                _save_titans(self.titans)
-                _send_discord_alert(entry, drop_info)
+                # Run drop time lookup in background — don't block the pika worker
+                def _do_drop_and_alert(uname=username, ent=entry):
+                    drop_info = get_exact_drop_time(uname)
+                    with self._lock:
+                        for t in self.titans:
+                            if t["username"].lower() == uname.lower():
+                                t["dropInfo"] = {
+                                    "available": drop_info["available"],
+                                    "source":    drop_info["source"],
+                                    "dropsAt":   drop_info["dropsAt"].isoformat() if drop_info["dropsAt"] else None,
+                                    "changedAt": drop_info["changedAt"].isoformat() if drop_info["changedAt"] else None,
+                                }
+                                break
+                    _save_titans(self.titans)
+                    _send_discord_alert(ent, drop_info)
+                Thread(target=_do_drop_and_alert, daemon=True).start()
 
             # Look up the full entry to send to the client (for rank badges etc.)
             with self._lock:
@@ -1331,7 +1332,7 @@ class CrawlEngine:
             self._pika_queue.task_done()
 
             # Gap between bot connections — reduces 'logging in too fast' kicks
-            time.sleep(3)
+            time.sleep(1.5)
 
     # --------------------------------------------------- manual pika scan
     def start_pika_scan(self, revisit=False):
@@ -1400,7 +1401,7 @@ class CrawlEngine:
                 "done":       done,
                 "total":      total,
             })
-            time.sleep(3)   # gap between bot checks
+            time.sleep(1.5)   # gap between bot checks
 
         with self._lock:
             self._pika_scan_running = False
@@ -1491,8 +1492,9 @@ crawler = CrawlEngine()
 # ---------------------------------------------------------------------------
 def _watchdog_loop():
     seed_index = 0
-    # Give the app a moment to fully boot
     time.sleep(10)
+    # Post initial digest on startup with existing titans
+    _update_digest()
     while True:
         if not crawler._running:
             seed  = AUTO_SEEDS[seed_index % len(AUTO_SEEDS)]
@@ -1500,7 +1502,7 @@ def _watchdog_loop():
             crawler.target_ranks = list(AUTO_RANKS)
             crawler.start(seed=seed, ranks=AUTO_RANKS)
             seed_index += 1
-        time.sleep(30)   # check every 30s
+        time.sleep(30)
 
 
 Thread(target=_watchdog_loop, daemon=True).start()
