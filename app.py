@@ -529,47 +529,47 @@ def get_exact_drop_time(username: str) -> dict:
     """
     Returns { dropsAt: datetime|None, changedAt: datetime|None,
                available: bool, source: str }
-    Priority: Mojang free check → Laby.net history → NameMC scrape
+    Priority: Laby.net history → NameMC scrape → Mojang 404 check
     """
     result = {"dropsAt": None, "changedAt": None, "available": False, "source": "none"}
+
+    # Get UUID first (needed for Laby)
+    uuid = None
     try:
         mj = http_session.get(
             f"https://api.mojang.com/users/profiles/minecraft/{username}",
             headers={"Accept": "application/json"}, timeout=6,
         )
-        if mj.status_code == 404:
-            result["available"] = True
-            result["source"]    = "mojang"
-            return result
-        if mj.status_code != 200:
-            return result
-        uuid = mj.json().get("id", "")
-    except Exception:
-        return result
-
-    if not uuid:
-        return result
-
-    uuid_fmt = f"{uuid[0:8]}-{uuid[8:12]}-{uuid[12:16]}-{uuid[16:20]}-{uuid[20:]}"
-
-    # Laby.net
-    try:
-        lb = http_session.get(
-            f"https://laby.net/api/v3/user/{uuid_fmt}/profile",
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-            timeout=8,
-        )
-        if lb.status_code == 200:
-            for entry in (lb.json().get("username_history") or []):
-                ts = entry.get("changed_at")
-                if ts:
-                    changed = _dt.datetime.fromtimestamp(ts / 1000, tz=_dt.timezone.utc)
-                    result["changedAt"] = changed
-                    result["dropsAt"]   = changed + _dt.timedelta(days=NAME_DROP_DAYS)
-                    result["source"]    = "laby"
-                    return result
+        if mj.status_code == 200:
+            uuid = mj.json().get("id", "")
+        # Don't return early on 404 — check Laby/NameMC first for drop history
     except Exception:
         pass
+
+    # Try Laby.net first (most accurate)
+    if uuid:
+        uuid_fmt = f"{uuid[0:8]}-{uuid[8:12]}-{uuid[12:16]}-{uuid[16:20]}-{uuid[20:]}"
+        try:
+            lb = http_session.get(
+                f"https://laby.net/api/v3/user/{uuid_fmt}/profile",
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                timeout=8,
+            )
+            if lb.status_code == 200:
+                for hist_entry in (lb.json().get("username_history") or []):
+                    ts = hist_entry.get("changed_at")
+                    if ts:
+                        changed = _dt.datetime.fromtimestamp(ts / 1000, tz=_dt.timezone.utc)
+                        drops   = changed + _dt.timedelta(days=NAME_DROP_DAYS)
+                        result["changedAt"] = changed
+                        result["dropsAt"]   = drops
+                        result["source"]    = "laby"
+                        # Only mark available if drop date has passed
+                        if drops <= _dt.datetime.now(_dt.timezone.utc):
+                            result["available"] = True
+                        return result
+        except Exception:
+            pass
 
     # NameMC fallback
     try:
@@ -579,16 +579,31 @@ def get_exact_drop_time(username: str) -> dict:
             headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"}, timeout=8,
         )
         if nm.status_code == 200:
-            times = re.findall(r'<time[^>]+datetime=["\']([^"\']+)["\']', nm.text, re.I)
+            html  = nm.text
+            times = re.findall(r'<time[^>]+datetime=["\']([^"\']+)["\']', html, re.I)
             if times:
-                changed = _dt.datetime.fromisoformat(times[0].replace("Z", "+00:00"))
-                result["changedAt"] = changed
-                result["dropsAt"]   = changed + _dt.timedelta(days=NAME_DROP_DAYS)
+                try:
+                    changed = _dt.datetime.fromisoformat(times[0].replace("Z", "+00:00"))
+                    drops   = changed + _dt.timedelta(days=NAME_DROP_DAYS)
+                    result["changedAt"] = changed
+                    result["dropsAt"]   = drops
+                    result["source"]    = "namemc"
+                    if drops <= _dt.datetime.now(_dt.timezone.utc):
+                        result["available"] = True
+                    return result
+                except Exception:
+                    pass
+            # NameMC explicitly says available with no history = never registered
+            if re.search(r'status-available|>Available<', html, re.I):
+                result["available"] = True
                 result["source"]    = "namemc"
                 return result
     except Exception:
         pass
 
+    # Last resort: Mojang 404 = name is free but we don't know why
+    # Don't mark as "available now" — show unknown drop time instead
+    # (could be in 37-day hold with no tracked history)
     return result
 
 
@@ -619,8 +634,8 @@ def _send_discord_alert(entry: dict, drop_info: dict | None = None):
 
     username   = entry.get("username", "?")
     ranks      = entry.get("ranks", [])
+    # Show the player's actual ranks, not the search targets
     rank_names = ", ".join(cleanstr(r.get("displayName", "")) for r in ranks) or "Unknown"
-    found_for  = ", ".join(entry.get("foundForRanks", [])) or rank_names
     last_seen  = entry.get("lastSeen")
     clan       = (entry.get("clan") or {}).get("name", "")
 
@@ -644,7 +659,7 @@ def _send_discord_alert(entry: dict, drop_info: dict | None = None):
     changed_str = changed_dt.strftime("%b %d, %Y at %H:%M UTC") if changed_dt else "–"
 
     fields = [
-        {"name": "🏆 Rank",         "value": found_for,   "inline": True},
+        {"name": "🏆 Rank",         "value": rank_names,  "inline": True},
         {"name": "✅ Pika",         "value": "Premium",   "inline": True},
         {"name": "👁 Last Seen",    "value": ls_str,      "inline": True},
         {"name": "🕒 Name Changed", "value": changed_str, "inline": True},
@@ -681,9 +696,26 @@ def _send_discord_alert(entry: dict, drop_info: dict | None = None):
     _update_digest()
 
 
-# digest message id persists in memory (reset on restart)
-_digest_message_id: str | None = None
+# digest message id — load from file so it survives restarts
 _digest_lock = Lock()
+
+def _load_digest_id() -> str | None:
+    try:
+        p = os.path.join(DATA_DIR, "digest_msg_id.txt")
+        if os.path.exists(p):
+            return open(p).read().strip() or None
+    except Exception:
+        pass
+    return None
+
+def _save_digest_id(mid: str):
+    try:
+        p = os.path.join(DATA_DIR, "digest_msg_id.txt")
+        open(p, "w").write(mid)
+    except Exception:
+        pass
+
+_digest_message_id: str | None = _load_digest_id()
 
 
 def _update_digest():
@@ -720,7 +752,10 @@ def _update_digest():
 
             for i, t in enumerate(titans, 1):
                 uname  = t.get("username", "?")
-                ranks  = ", ".join(cleanstr(r.get("displayName", "")) for r in t.get("ranks", [])) or "?"
+                # Show actual player ranks, not search targets
+                actual_ranks = ", ".join(
+                    cleanstr(r.get("displayName", "")) for r in t.get("ranks", [])
+                ) or "?"
                 di     = t.get("dropInfo") or {}
                 drop_dt  = di.get("dropsAt")
                 available = di.get("available", False)
@@ -741,7 +776,7 @@ def _update_digest():
                 else:
                     status = "❓ Unknown"
 
-                lines.append(f"{i}. [{uname}](https://namemc.com/name/{uname}) — **{ranks}** — {status}")
+                lines.append(f"{i}. [{uname}](https://namemc.com/name/{uname}) — **{actual_ranks}** — {status}")
 
             lines.append(f"\n*Updated: {now.strftime('%b %d, %Y %H:%M UTC')}*")
             content = "\n".join(lines)
@@ -765,7 +800,10 @@ def _update_digest():
                 )
                 if r.status_code in (200, 204):
                     try:
-                        _digest_message_id = r.json().get("id")
+                        mid = r.json().get("id")
+                        if mid:
+                            _digest_message_id = mid
+                            _save_digest_id(mid)
                     except Exception:
                         pass
             except Exception as e:
