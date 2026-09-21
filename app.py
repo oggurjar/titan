@@ -642,9 +642,8 @@ def _send_discord_alert(entry: dict, drop_info: dict | None = None):
     if last_seen:
         try:
             dt     = _dt.datetime.fromtimestamp(last_seen / 1000, tz=_dt.timezone.utc)
-            diff_s = (_dt.datetime.now(_dt.timezone.utc) - dt).total_seconds()
-            d = int(diff_s // 86400); h = int((diff_s % 86400) // 3600)
-            ls_str = f"{d}d {h}h ago" if d else f"{h}h ago" if h else "Just now"
+            unix_ts = int(dt.timestamp())
+            ls_str = f"<t:{unix_ts}:R>"  # Discord relative timestamp e.g. "25 days ago"
         except Exception:
             ls_str = "Unknown"
     else:
@@ -655,8 +654,17 @@ def _send_discord_alert(entry: dict, drop_info: dict | None = None):
     available  = drop_info.get("available", False) if drop_info else False
     source     = drop_info.get("source", "none")   if drop_info else "none"
 
-    drop_str    = _fmt_drop_str(drop_dt, available)
-    changed_str = changed_dt.strftime("%b %d, %Y at %H:%M UTC") if changed_dt else "–"
+    # Format drop time with Discord timestamp
+    if available or (drop_dt and drop_dt <= _dt.datetime.now(_dt.timezone.utc)):
+        drop_str    = "🟢 **CLAIMABLE NOW**"
+        changed_str = changed_dt.strftime("%b %d, %Y at %H:%M UTC") if changed_dt else "–"
+    elif drop_dt:
+        unix_drop   = int(drop_dt.timestamp())
+        drop_str    = f"<t:{unix_drop}:F>\n`<t:{unix_drop}:R>`"
+        changed_str = changed_dt.strftime("%b %d, %Y at %H:%M UTC") if changed_dt else "–"
+    else:
+        drop_str    = f"❓ Unknown — [Check NameMC](https://namemc.com/name/{username})"
+        changed_str = changed_dt.strftime("%b %d, %Y at %H:%M UTC") if changed_dt else "–"
 
     fields = [
         {"name": "🏆 Rank",         "value": rank_names,  "inline": True},
@@ -735,55 +743,104 @@ def _update_digest():
                 di = t.get("dropInfo") or {}
                 if di.get("available"):
                     return (0, _dt.datetime.min.replace(tzinfo=_dt.timezone.utc))
-                dt = di.get("dropsAt")
-                if dt:
-                    if isinstance(dt, str):
+                drop = di.get("dropsAt")
+                if drop:
+                    if isinstance(drop, str):
                         try:
-                            dt = _dt.datetime.fromisoformat(dt.replace("Z", "+00:00"))
+                            drop = _dt.datetime.fromisoformat(drop.replace("Z", "+00:00"))
                         except Exception:
-                            dt = None
-                    if dt:
-                        return (1, dt)
+                            drop = None
+                    if drop:
+                        return (1, drop)
                 return (2, _dt.datetime.max.replace(tzinfo=_dt.timezone.utc))
 
             titans.sort(key=sort_key)
-            now   = _dt.datetime.now(_dt.timezone.utc)
-            lines = ["## 🏆 Premium Accounts — Sorted by Drop Date\n"]
+            now = _dt.datetime.now(_dt.timezone.utc)
 
-            for i, t in enumerate(titans, 1):
-                uname  = t.get("username", "?")
-                # Show actual player ranks, not search targets
+            # Build one embed per account (max 10 embeds per message)
+            embeds = []
+            for t in titans[:10]:
+                uname       = t.get("username", "?")
                 actual_ranks = ", ".join(
                     cleanstr(r.get("displayName", "")) for r in t.get("ranks", [])
                 ) or "?"
-                di     = t.get("dropInfo") or {}
-                drop_dt  = di.get("dropsAt")
-                available = di.get("available", False)
+                last_seen   = t.get("lastSeen")
+                clan        = (t.get("clan") or {}).get("name", "")
+                di          = t.get("dropInfo") or {}
+                drop_dt     = di.get("dropsAt")
+                changed_dt  = di.get("changedAt")
+                available   = di.get("available", False)
+                source      = di.get("source", "none")
+
                 if isinstance(drop_dt, str):
                     try:
                         drop_dt = _dt.datetime.fromisoformat(drop_dt.replace("Z", "+00:00"))
                     except Exception:
                         drop_dt = None
+                if isinstance(changed_dt, str):
+                    try:
+                        changed_dt = _dt.datetime.fromisoformat(changed_dt.replace("Z", "+00:00"))
+                    except Exception:
+                        changed_dt = None
 
+                # Drop status
                 if available or (drop_dt and (drop_dt - now).total_seconds() <= 0):
-                    status = "🟢 **CLAIMABLE NOW**"
+                    drop_str  = "🟢 **CLAIMABLE NOW**"
+                    color     = 0x10b981   # green
                 elif drop_dt:
-                    diff = (drop_dt - now).total_seconds()
+                    diff      = (drop_dt - now).total_seconds()
                     d = int(diff // 86400); h = int((diff % 86400) // 3600); m = int((diff % 3600) // 60)
-                    date_s    = drop_dt.strftime("%b %d at %H:%M UTC")
+                    date_s    = drop_dt.strftime("%b %d, %Y at %H:%M UTC")
                     countdown = f"{d}d {h}h {m}m" if d else f"{h}h {m}m" if h else f"{m}m"
-                    status = f"⏳ {date_s} ({countdown})"
+                    drop_str  = f"⏳ {date_s}\n`{countdown} remaining`"
+                    color     = 0xa78bfa   # purple
                 else:
-                    status = "❓ Unknown"
+                    drop_str  = f"❓ Unknown — [Check NameMC](https://namemc.com/name/{uname})"
+                    color     = 0x64748b   # grey
 
-                lines.append(f"{i}. [{uname}](https://namemc.com/name/{uname}) — **{actual_ranks}** — {status}")
+                changed_str = changed_dt.strftime("%b %d, %Y at %H:%M UTC") if changed_dt else "–"
 
-            lines.append(f"\n*Updated: {now.strftime('%b %d, %Y %H:%M UTC')}*")
-            content = "\n".join(lines)
-            if len(content) > 1980:
-                content = content[:1977] + "..."
+                if last_seen:
+                    try:
+                        dt     = _dt.datetime.fromtimestamp(last_seen / 1000, tz=_dt.timezone.utc)
+                        diff_s = (now - dt).total_seconds()
+                        d2 = int(diff_s // 86400); h2 = int((diff_s % 86400) // 3600)
+                        ls_str = f"{d2}d {h2}h ago" if d2 else f"{h2}h ago" if h2 else "Just now"
+                    except Exception:
+                        ls_str = "Unknown"
+                else:
+                    ls_str = "⚠️ Never played"
 
-            payload = {"content": content}
+                fields = [
+                    {"name": "🏆 Rank",         "value": actual_ranks, "inline": True},
+                    {"name": "👁 Last Seen",     "value": ls_str,       "inline": True},
+                ]
+                if clan:
+                    fields.append({"name": "🏠 Clan", "value": clan, "inline": True})
+                fields += [
+                    {"name": "🕒 Name Changed",  "value": changed_str,  "inline": True},
+                    {"name": "⏳ Claimable",      "value": drop_str,     "inline": False},
+                ]
+
+                embeds.append({
+                    "title":     f"⚡ {uname}",
+                    "url":       f"https://namemc.com/name/{uname}",
+                    "color":     color,
+                    "fields":    fields,
+                    "thumbnail": {"url": f"https://mc-heads.net/avatar/{uname}/64"},
+                    "footer":    {"text": f"source: {source}"},
+                })
+
+            # Header embed
+            header = {
+                "title":       "🏆 Premium Accounts — Sorted by Drop Date",
+                "description": f"**{len(titans)} accounts found** • Updated <t:{int(now.timestamp())}:R>",
+                "color":       0x1e293b,
+            }
+            all_embeds = [header] + embeds
+
+            payload = {"embeds": all_embeds, "flags": 4}  # flags=4 suppresses link previews
+
             try:
                 if _digest_message_id:
                     r = http_session.patch(
