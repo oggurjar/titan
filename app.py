@@ -1509,6 +1509,22 @@ Thread(target=_watchdog_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
+# DIGEST REFRESH LOOP — re-edits the digest every 10 min with fresh countdowns
+# ---------------------------------------------------------------------------
+def _digest_refresh_loop():
+    time.sleep(15)   # wait for startup to settle
+    while True:
+        try:
+            _update_digest()
+        except Exception as e:
+            print(f"[DIGEST-REFRESH] {e}")
+        time.sleep(600)   # every 10 minutes
+
+
+Thread(target=_digest_refresh_loop, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # FLASK ROUTES
 # ---------------------------------------------------------------------------
 @app.route("/")
