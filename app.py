@@ -80,8 +80,8 @@ _skin_rl       = RateLimiter(rate=8)    # mc-heads.net              — 8 req/s
 # Prevents double-fetching the same username within a single run.
 # ---------------------------------------------------------------------------
 CACHE_LOCK = Lock()
-CACHE_TTL  = 600        # 10 min (was 20)
-CACHE_MAX  = 2_000      # was 10,000 — saves ~80MB RAM
+CACHE_TTL  = 600
+CACHE_MAX  = 500       # reduced from 2000 — saves RAM on free tier
 _PROFILE_CACHE: OrderedDict = OrderedDict()
 
 
@@ -119,6 +119,24 @@ SEEN_FILE      = os.path.join(DATA_DIR, "seen_titans.json")
 PCACHE_FILE    = os.path.join(DATA_DIR, "player_cache.json")
 WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
 TITANS_FILE    = os.path.join(DATA_DIR, "titans.json")
+LAST_SEED_FILE = os.path.join(DATA_DIR, "last_seed.txt")
+
+
+def _load_last_seed() -> str | None:
+    try:
+        if os.path.exists(LAST_SEED_FILE):
+            v = open(LAST_SEED_FILE, encoding="utf-8").read().strip()
+            return v or None
+    except Exception:
+        pass
+    return None
+
+
+def _save_last_seed(username: str):
+    try:
+        open(LAST_SEED_FILE, "w", encoding="utf-8").write(username)
+    except Exception as e:
+        print(f"[LAST_SEED] Save failed: {e}")
 
 # ---------------------------------------------------------------------------
 # SEEN LIST
@@ -910,9 +928,8 @@ class CrawlEngine:
         self._sse_clients: list[queue.Queue] = []
         self._clients_lock = Lock()
 
-        # 10 workers is the sweet spot: enough parallelism without hammering.
-        # The rate limiter caps actual throughput, not the worker count.
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+        # 5 workers — enough parallelism without hammering RAM on free tier
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
         self._pika_queue: queue.Queue = queue.Queue()
         # Single bot worker — sequential pika checks with a gap between them
@@ -1055,8 +1072,8 @@ class CrawlEngine:
 
     def _current_state(self) -> dict:
         return {
-            "visited":    list(self.visited),
-            "queue":      list(self._queue)[:5000],
+            "visited":    [],              # not saved — too much RAM
+            "queue":      list(self._queue)[:2000],
             "scanned":    self.scanned,
             "seed":       self.seed,
             "targetRanks": self.target_ranks,
@@ -1296,6 +1313,8 @@ class CrawlEngine:
 
             # Fire Discord webhook for premium accounts
             if result == "premium":
+                # Save this username as the next restart seed
+                _save_last_seed(username)
                 # Run drop time lookup in background — don't block the pika worker
                 def _do_drop_and_alert(uname=username, ent=entry):
                     drop_info = get_exact_drop_time(uname)
@@ -1492,16 +1511,30 @@ crawler = CrawlEngine()
 # ---------------------------------------------------------------------------
 def _watchdog_loop():
     seed_index = 0
-    time.sleep(10)
-    # Post initial digest on startup with existing titans
-    _update_digest()
+    time.sleep(30)   # wait longer for full startup before touching crawler
+
+    # Post initial digest with existing titans
+    try:
+        _update_digest()
+    except Exception as e:
+        print(f"[WATCHDOG] Initial digest failed: {e}")
+
     while True:
-        if not crawler._running:
-            seed  = AUTO_SEEDS[seed_index % len(AUTO_SEEDS)]
-            print(f"[WATCHDOG] Starting crawl — seed: {seed}, ranks: {AUTO_RANKS}")
-            crawler.target_ranks = list(AUTO_RANKS)
-            crawler.start(seed=seed, ranks=AUTO_RANKS)
-            seed_index += 1
+        try:
+            if not crawler._running:
+                # Use last found premium account as seed (smarter restart point)
+                last = _load_last_seed()
+                if last:
+                    seed = last
+                    print(f"[WATCHDOG] Resuming from last seed: {seed}")
+                else:
+                    seed = AUTO_SEEDS[seed_index % len(AUTO_SEEDS)]
+                    seed_index += 1
+                    print(f"[WATCHDOG] Starting from hardcoded seed: {seed}")
+                crawler.target_ranks = list(AUTO_RANKS)
+                crawler.start(seed=seed, ranks=AUTO_RANKS)
+        except Exception as e:
+            print(f"[WATCHDOG] Error: {e}")
         time.sleep(30)
 
 
@@ -1512,12 +1545,13 @@ Thread(target=_watchdog_loop, daemon=True).start()
 # DIGEST REFRESH LOOP — re-edits the digest every 10 min with fresh countdowns
 # ---------------------------------------------------------------------------
 def _digest_refresh_loop():
-    time.sleep(15)   # wait for startup to settle
+    time.sleep(60)   # wait 60s so crawler is fully ready before first run
     while True:
         try:
             _update_digest()
         except Exception as e:
             print(f"[DIGEST-REFRESH] {e}")
+        time.sleep(600)   # every 10 minutes
         time.sleep(600)   # every 10 minutes
 
 
